@@ -1,0 +1,573 @@
+'use client';
+
+import Link from 'next/link';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCart, type StoreCategory } from '@/components/CartProvider';
+import { formatPrice, type Product } from '@/lib/products';
+import StoreBannerSlider from '@/components/StoreBannerSlider';
+import type { StoreBanner } from '@/lib/store-banners';
+import CustomerReviews from '@/components/CustomerReviews';
+
+const categorySymbols: Record<string, string> = {
+  'آيفون': '',
+  'سامسونج': '◈',
+  'سماعات': '♫',
+  'شواحن': 'ϟ',
+  'إكسسوارات': '✦'
+};
+
+const PRODUCT_COLOR_HEX: Record<string, string> = {
+  'أسود': '#171717', 'اسود': '#171717', black: '#171717',
+  'أبيض': '#fafafa', 'ابيض': '#fafafa', white: '#fafafa',
+  'أحمر': '#d93642', 'احمر': '#d93642', red: '#d93642',
+  'أصفر': '#f3cb3d', 'اصفر': '#f3cb3d', yellow: '#f3cb3d',
+  'أزرق': '#2874d9', 'ازرق': '#2874d9', blue: '#2874d9',
+  'أخضر': '#299660', 'اخضر': '#299660', green: '#299660',
+  'بنفسجي': '#8255c5', purple: '#8255c5',
+  'وردي': '#f09ab9', pink: '#f09ab9',
+  'بني': '#805438', brown: '#805438',
+  'برتقالي': '#ee851d', orange: '#ee851d',
+  'رمادي': '#92969c', gray: '#92969c', grey: '#92969c',
+  'ذهبي': '#c8a04c', gold: '#c8a04c',
+  'فضي': '#c6cbd1', silver: '#c6cbd1',
+  'تيتانيوم طبيعي': '#aaa69d', 'تيتانيوم': '#aaa69d',
+  'أزرق داكن': '#1d355c', 'ازرق داكن': '#1d355c',
+  'كحلي': '#1d355c', 'الكحلي': '#1d355c', 'كحلى': '#1d355c', navy: '#1d355c',
+  'جليدي': '#dce8f4', 'الجليدي': '#dce8f4', 'خمري': '#76263f',
+  'عنابي': '#76263f', 'العنابي': '#76263f', burgundy: '#76263f', maroon: '#76263f',
+  'برتقالي كوني': '#e87932', 'أزرق ضبابي': '#a9c4dd',
+  'أخضر مريمي': '#97aa92', 'أبيض سحابي': '#f5f5f0',
+  'ذهبي فاتح': '#d9c59e', 'وردي ناعم': '#f4cbd5',
+  'أسود فضائي': '#292d37',
+  'التيتانيوم أسود': '#55565a', 'تيتانيوم أسود': '#55565a', 'تايتانيوم أسود': '#55565a',
+  'التيتانيوم صحراوي': '#bfa58b', 'تيتانيوم صحراوي': '#bfa58b', 'تايتانيوم صحراوي': '#bfa58b',
+  'تيتانيوم أبيض': '#e6e4df',
+  'أزرق سماوي': '#9dc8e9'
+};
+
+function normalizeProductColorName(color: string) {
+  const normalized = color.trim().normalize('NFKC').replace(/\s+/g, ' ');
+  const titaniumMatch = normalized.match(/^(?:ال)?(?:تيتانيوم|تايتانيوم)\s+(أسود|اسود|صحراوي)$/);
+  if (titaniumMatch) return titaniumMatch[1] === 'صحراوي' ? 'التيتانيوم صحراوي' : 'التيتانيوم أسود';
+  return normalized;
+}
+
+function getProductColorHex(color: string) {
+  const normalized = color.trim().toLocaleLowerCase('ar');
+  if (/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(normalized)) return normalized;
+  return PRODUCT_COLOR_HEX[normalized] || '#b7b7b7';
+}
+
+function normalizeSearchValue(value: string | number) {
+  return String(value)
+    .normalize('NFKC')
+    .toLocaleLowerCase('ar')
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/[ًٌٍَُِّْـ]/g, '')
+    .replace(/[٠-٩]/g, (digit) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)))
+    .replace(/[۰-۹]/g, (digit) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit)))
+    .trim();
+}
+
+function matchesSearch(product: Product, term: string) {
+  if (!term) return true;
+  const searchableValues = [
+    product.name,
+    product.category,
+    product.shortDescription,
+    product.description,
+    product.price,
+    product.oldPrice || '',
+    product.id,
+    ...(product.specifications || []),
+    ...(product.colors || []),
+    ...(product.storageOptions || [])
+  ];
+  return searchableValues.some((value) => normalizeSearchValue(value).includes(term));
+}
+
+export type InitialStoreCatalog = {
+  products: Product[];
+  categories: StoreCategory[];
+};
+
+export default function StoreHome({
+  initialCatalog = null,
+  initialBanners = null
+}: {
+  initialCatalog?: InitialStoreCatalog | null;
+  initialBanners?: StoreBanner[] | null;
+}) {
+  const { catalogProducts, catalogCategories, catalogStatus } = useCart();
+  // Prefer the fresh server-rendered MongoDB snapshot on the first paint.
+  // Once the background request finishes, the live provider data takes over.
+  const products = catalogStatus === 'ready'
+    ? catalogProducts
+    : initialCatalog?.products ?? catalogProducts;
+  const categories = catalogStatus === 'ready'
+    ? catalogCategories
+    : initialCatalog?.categories ?? catalogCategories;
+  const isCatalogLoading = catalogStatus === 'loading' && !initialCatalog;
+  const hasCatalogError = catalogStatus === 'error' && !initialCatalog;
+  const [search, setSearch] = useState('');
+
+  useEffect(() => {
+    const initialQuery = new URLSearchParams(window.location.search).get('q') || '';
+    if (initialQuery) setSearch(initialQuery);
+    const handleSearch = (event: Event) => {
+      const queryEvent = event as CustomEvent<string>;
+      setSearch(queryEvent.detail || '');
+    };
+    window.addEventListener('store-search', handleSearch);
+    return () => window.removeEventListener('store-search', handleSearch);
+  }, []);
+  const [selectedCategory, setSelectedCategory] = useState('');
+  const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
+  const term = normalizeSearchValue(search);
+
+  const searchedProducts = useMemo(
+    () => products.filter((product) => matchesSearch(product, term)),
+    [products, term]
+  );
+
+  const allCategories = useMemo(() => {
+    const knownNames = new Set(categories.map((category) => category.name));
+    const extraNames = Array.from(new Set(products.map((product) => product.category)))
+      .filter((name) => name && !knownNames.has(name) && categories.length === 0);
+    return [
+      ...categories,
+      ...extraNames.map((name) => ({ id: name, name, description: 'تصفح منتجات القسم' }))
+    ];
+  }, [categories, products]);
+
+  useEffect(() => {
+    if (selectedCategory && !allCategories.some((category) => category.name === selectedCategory)) setSelectedCategory('');
+  }, [allCategories, selectedCategory]);
+
+  const sections = useMemo(
+    () => allCategories
+      .map((category) => ({
+        ...category,
+        products: searchedProducts.filter((product) => product.category === category.name)
+      }))
+      .filter((category) => (!term || category.products.length > 0) && (!selectedCategory || selectedCategory === category.name)),
+    [allCategories, searchedProducts, term, selectedCategory]
+  );
+
+  function toggleCategory(categoryName: string) {
+    setExpandedCategory((current) => current === categoryName ? null : categoryName);
+  }
+
+  return (
+    <main className="store-home" id="home">
+      <StoreBannerSlider initialBanners={initialBanners ?? []} />
+      <div className="category-stream" id="categories">
+        {isCatalogLoading ? (
+          <div className="catalog-loading-skeleton" aria-hidden="true">
+            <style jsx>{`
+              .catalog-loading-skeleton { width: 100%; padding-bottom: 8px; }
+              .catalog-loading-section {
+                width: 100%;
+                margin: 0 0 20px;
+                padding: 0 max(15px, calc((100% - 1160px) / 2));
+              }
+              .catalog-loading-heading {
+                display: flex;
+                align-items: center;
+                gap: 11px;
+                margin-bottom: 10px;
+              }
+              .catalog-loading-heading-icon {
+                display: block;
+                flex: 0 0 40px;
+                width: 40px;
+                height: 40px;
+                border-radius: 12px;
+              }
+              .catalog-loading-heading-lines {
+                display: flex;
+                flex-direction: column;
+                gap: 7px;
+                width: 150px;
+              }
+              .catalog-loading-heading-lines i,
+              .catalog-loading-image,
+              .catalog-loading-copy i {
+                display: block;
+                background: linear-gradient(90deg, #f0f0f2 20%, #fafafa 48%, #f0f0f2 76%);
+                background-size: 220% 100%;
+                animation: catalog-loading-shimmer 1.35s ease-in-out infinite;
+              }
+              .catalog-loading-heading-lines i {
+                height: 9px;
+                border-radius: 99px;
+              }
+              .catalog-loading-heading-lines i:first-child { width: 112px; }
+              .catalog-loading-heading-lines i:last-child { width: 66px; height: 7px; }
+              .catalog-loading-rail {
+                display: flex;
+                gap: 10px;
+                overflow: hidden;
+                padding: 1px 1px 9px;
+              }
+              .catalog-loading-card {
+                display: flex;
+                align-items: center;
+                flex: 0 0 238px;
+                width: 238px;
+                height: 104px;
+                gap: 10px;
+                padding: 8px;
+                border: 1px solid #e5e5ea;
+                border-radius: 16px;
+                background: #fff;
+              }
+              .catalog-loading-image {
+                flex: 0 0 82px;
+                width: 82px;
+                height: 82px;
+                border-radius: 10px;
+              }
+              .catalog-loading-copy {
+                display: flex;
+                flex: 1;
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 9px;
+                min-width: 0;
+              }
+              .catalog-loading-copy i {
+                height: 8px;
+                border-radius: 99px;
+              }
+              .catalog-loading-copy i:nth-child(1) { width: 76%; }
+              .catalog-loading-copy i:nth-child(2) { width: 94%; }
+              .catalog-loading-copy i:nth-child(3) { width: 43%; margin-top: 8px; }
+              @keyframes catalog-loading-shimmer {
+                0% { background-position: 100% 0; }
+                100% { background-position: -120% 0; }
+              }
+              @media (prefers-reduced-motion: reduce) {
+                .catalog-loading-heading-lines i,
+                .catalog-loading-image,
+                .catalog-loading-copy i { animation: none; }
+              }
+            `}</style>
+            {Array.from({ length: 3 }, (_, sectionIndex) => (
+              <section className="catalog-loading-section" key={sectionIndex}>
+                <div className="catalog-loading-heading">
+                  <span className="catalog-loading-heading-icon" />
+                  <span className="catalog-loading-heading-lines"><i /><i /></span>
+                </div>
+                <div className="catalog-loading-rail">
+                  {Array.from({ length: 4 }, (_, cardIndex) => (
+                    <div className="catalog-loading-card" key={cardIndex}>
+                      <span className="catalog-loading-image" />
+                      <span className="catalog-loading-copy"><i /><i /><i /></span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ))}
+          </div>
+        ) : hasCatalogError ? (
+          <div className="store-no-results" role="alert">
+            <strong>تعذر تحميل المنتجات حاليًا</strong>
+            <p>تحقق من اتصال قاعدة البيانات وحاول تحديث الصفحة.</p>
+          </div>
+        ) : sections.length ? sections.map((category) => {
+          const isExpanded = expandedCategory === category.name;
+          const symbol = categorySymbols[category.name] || '✦';
+
+          return (
+            <section className="category-stream-section" id={'category-' + category.name} key={category.id || category.name} aria-label={'قسم ' + category.name}>
+              <div className="category-stream-heading">
+                <button
+                  type="button"
+                  className="category-heading-main"
+                  onClick={() => category.products.length && toggleCategory(category.name)}
+                  aria-expanded={isExpanded}
+                  disabled={!category.products.length}
+                >
+                  <span className="category-stream-symbol" aria-hidden="true">{symbol}</span>
+                  <span className="category-heading-copy">
+                    <strong>{category.name}</strong>
+                    <small>{category.products.length ? category.products.length + ' منتج' : 'لا توجد منتجات حاليًا'}</small>
+                  </span>
+                </button>
+                {category.products.length > 4 ? (
+                  <button
+                    type="button"
+                    className="category-more-button"
+                    onClick={() => toggleCategory(category.name)}
+                    aria-expanded={isExpanded}
+                  >
+                    {isExpanded ? 'عرض أقل' : 'المزيد'}
+                    <span aria-hidden="true">{isExpanded ? '↑' : '←'}</span>
+                  </button>
+                ) : null}
+              </div>
+
+              {category.products.length ? (
+                isExpanded ? (
+                  <div className="category-expanded-grid" aria-label={'كل منتجات ' + category.name}>
+                    {category.products.map((product) => (
+                      <StripProductCard key={'expanded-' + product.id} product={product} />
+                    ))}
+                  </div>
+                ) : (
+                  <AutoProductSlider categoryName={category.name} products={category.products} />
+                )
+              ) : (
+                <div className="category-no-products">سيتم عرض المنتجات هنا عند إضافتها من لوحة الإدارة.</div>
+              )}
+            </section>
+          );
+        }) : (
+          <div className="store-no-results">
+            <span>⌕</span>
+            <strong>ما لقيناش منتج مطابق للبحث</strong>
+            <p>جرّب اسمًا أو لونًا أو سعرًا مختلفًا.</p>
+            <button type="button" className="store-reset-search" onClick={() => { setSearch(''); setSelectedCategory(''); }}>عرض كل الأقسام</button>
+          </div>
+        )}
+      </div>
+
+      <CustomerReviews />
+    </main>
+  );
+}
+
+
+function AutoProductSlider({ categoryName, products }: { categoryName: string; products: Product[] }) {
+  const sliderRef = useRef<HTMLDivElement>(null);
+  const activeStartRef = useRef(0);
+
+  useEffect(() => {
+    const slider = sliderRef.current;
+    if (!slider) return;
+
+    let intervalId: number | undefined;
+    let resumeTimeoutId: number | undefined;
+    let resizeObserver: ResizeObserver | undefined;
+    let isPaused = false;
+
+    const getCards = () => Array.from(slider.querySelectorAll<HTMLElement>('.strip-product-card'));
+
+    const getVisibleCount = (cards: HTMLElement[]) => {
+      if (!cards.length) return 1;
+      const computed = window.getComputedStyle(slider);
+      const gap = Number.parseFloat(computed.columnGap || computed.gap || '0') || 0;
+      const cardWidth = cards[0].getBoundingClientRect().width;
+      if (!cardWidth) return 1;
+      return Math.max(1, Math.floor((slider.clientWidth + gap) / (cardWidth + gap)));
+    };
+
+    const stopAutoplay = () => {
+      if (intervalId !== undefined) window.clearInterval(intervalId);
+      intervalId = undefined;
+    };
+
+    const syncActiveStart = () => {
+      const cards = getCards();
+      if (!cards.length) {
+        activeStartRef.current = 0;
+        return;
+      }
+      const containerRect = slider.getBoundingClientRect();
+      const isRtl = window.getComputedStyle(slider).direction === 'rtl';
+      const edge = isRtl ? containerRect.right : containerRect.left;
+      let closestIndex = 0;
+      let closestDistance = Number.POSITIVE_INFINITY;
+
+      cards.forEach((card, index) => {
+        const rect = card.getBoundingClientRect();
+        const cardEdge = isRtl ? rect.right : rect.left;
+        const distance = Math.abs(cardEdge - edge);
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          closestIndex = index;
+        }
+      });
+      activeStartRef.current = closestIndex;
+    };
+
+    const startAutoplay = () => {
+      stopAutoplay();
+      if (isPaused) return;
+      const cards = getCards();
+      const visibleCount = getVisibleCount(cards);
+      if (cards.length <= visibleCount || slider.scrollWidth <= slider.clientWidth + 2) return;
+
+      intervalId = window.setInterval(() => {
+        // Do not call scrollIntoView for rails outside the viewport: it can move
+        // the whole document vertically back to a product section while the user is elsewhere.
+        const sliderRect = slider.getBoundingClientRect();
+        if (sliderRect.top < 0 || sliderRect.bottom > window.innerHeight) return;
+
+        const currentCards = getCards();
+        const currentVisibleCount = getVisibleCount(currentCards);
+        if (currentCards.length <= currentVisibleCount || slider.scrollWidth <= slider.clientWidth + 2) {
+          stopAutoplay();
+          activeStartRef.current = 0;
+          return;
+        }
+
+        const lastStart = currentCards.length - currentVisibleCount;
+        const currentStart = Math.min(activeStartRef.current, lastStart);
+        const nextStart = currentStart >= lastStart
+          ? 0
+          : Math.min(currentStart + currentVisibleCount, lastStart);
+        activeStartRef.current = nextStart;
+
+        const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        currentCards[nextStart]?.scrollIntoView({
+          behavior: reducedMotion ? 'auto' : 'smooth',
+          block: 'nearest',
+          inline: 'start'
+        });
+      }, 5000);
+    };
+
+    const pauseAutoplay = () => {
+      isPaused = true;
+      stopAutoplay();
+      if (resumeTimeoutId !== undefined) window.clearTimeout(resumeTimeoutId);
+      resumeTimeoutId = undefined;
+    };
+    const resumeAutoplay = () => {
+      if (resumeTimeoutId !== undefined) window.clearTimeout(resumeTimeoutId);
+      resumeTimeoutId = window.setTimeout(() => {
+        isPaused = false;
+        startAutoplay();
+        resumeTimeoutId = undefined;
+      }, 5000);
+    };
+    const handleWheel = () => {
+      pauseAutoplay();
+      resumeAutoplay();
+    };
+
+    slider.addEventListener('scroll', syncActiveStart, { passive: true });
+    slider.addEventListener('pointerdown', pauseAutoplay, { passive: true });
+    slider.addEventListener('wheel', handleWheel, { passive: true });
+    slider.addEventListener('focusin', pauseAutoplay);
+    slider.addEventListener('focusout', resumeAutoplay);
+    window.addEventListener('pointerup', resumeAutoplay, { passive: true });
+    window.addEventListener('pointercancel', resumeAutoplay, { passive: true });
+    window.addEventListener('resize', startAutoplay, { passive: true });
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(startAutoplay);
+      resizeObserver.observe(slider);
+    }
+    startAutoplay();
+
+    return () => {
+      stopAutoplay();
+      if (resumeTimeoutId !== undefined) window.clearTimeout(resumeTimeoutId);
+      resizeObserver?.disconnect();
+      slider.removeEventListener('scroll', syncActiveStart);
+      slider.removeEventListener('pointerdown', pauseAutoplay);
+      slider.removeEventListener('wheel', handleWheel);
+      slider.removeEventListener('focusin', pauseAutoplay);
+      slider.removeEventListener('focusout', resumeAutoplay);
+      window.removeEventListener('pointerup', resumeAutoplay);
+      window.removeEventListener('pointercancel', resumeAutoplay);
+      window.removeEventListener('resize', startAutoplay);
+    };
+  }, [categoryName, products]);
+
+  return (
+    <div ref={sliderRef} className="category-product-slider" aria-label={'منتجات ' + categoryName}>
+      {products.map((product) => (
+        <StripProductCard key={product.id} product={product} />
+      ))}
+    </div>
+  );
+}
+
+function StripProductCard({ product }: { product: Product }) {
+  const { addToCart } = useCart();
+  const [added, setAdded] = useState(false);
+  const availableProductColors = Array.from(new Set((product.colors || [])
+    .filter((color) => typeof color === 'string' && color.trim())
+    .map(normalizeProductColorName)));
+
+  function handleAdd() {
+    addToCart(product.id);
+    setAdded(true);
+    window.setTimeout(() => setAdded(false), 1200);
+  }
+
+  return (
+    <article className="strip-product-card">
+      <Link href={'/products/' + product.id} className="strip-product-image" aria-label={'تفاصيل ' + product.name}>
+        <img
+          src={product.image}
+          alt={product.name}
+          loading="lazy"
+          onError={(event) => {
+            event.currentTarget.onerror = null;
+            event.currentTarget.src = '/product-image-placeholder.svg';
+          }}
+        />
+        {product.badge ? <span className="strip-product-badge">{product.badge}</span> : null}
+      </Link>
+      <div className="strip-product-info">
+        <span className="strip-product-category">{product.category}</span>
+        <Link href={'/products/' + product.id} className="strip-product-name">{product.name}</Link>
+        {availableProductColors.length ? (
+          <div
+            className="strip-product-colors"
+            role="img"
+            aria-label={'الألوان المتاحة: ' + availableProductColors.join('، ')}
+            title={'الألوان: ' + availableProductColors.join('، ')}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, minHeight: 15, margin: '2px 0 5px', overflow: 'hidden' }}
+          >
+            <span style={{ color: '#777', fontSize: 9, whiteSpace: 'nowrap' }}>الألوان</span>
+            {availableProductColors.slice(0, 5).map((color) => (
+              <span
+                key={color}
+                aria-hidden="true"
+                style={{ display: 'inline-block', flex: '0 0 auto', width: 11, height: 11, borderRadius: '50%', border: '1px solid rgba(0,0,0,.16)', backgroundColor: getProductColorHex(color) }}
+              />
+            ))}
+            {availableProductColors.length > 5 ? (
+              <span style={{ color: '#777', fontSize: 9 }}>+{availableProductColors.length - 5}</span>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="strip-product-bottom">
+          <div className="strip-price-group">
+            <strong>{formatPrice(product.price)}</strong>
+            {product.oldPrice ? <del>{formatPrice(product.oldPrice)}</del> : null}
+          </div>
+          <div className="strip-product-actions">
+            <Link
+              href={'/products/' + product.id}
+              className="strip-add-button"
+              aria-label={'اطلب ' + product.name + ' الآن'}
+              title="اطلب الآن"
+            >
+              اطلب الآن
+            </Link>
+            <button
+              type="button"
+              className={'strip-go-cart-button' + (added ? ' is-added' : '')}
+              onClick={handleAdd}
+              aria-label={added ? 'تمت إضافة ' + product.name + ' إلى السلة' : 'إضافة ' + product.name + ' إلى السلة'}
+              title={added ? 'تمت الإضافة إلى السلة' : 'إضافة إلى السلة'}
+            >
+              {added ? (
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>
+              ) : (
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h2l2.1 10.1a2 2 0 0 0 2 1.6h7.8a2 2 0 0 0 1.9-1.4L21 8H6" /><circle cx="10" cy="20" r="1.2" /><circle cx="18" cy="20" r="1.2" /></svg>
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+    </article>
+  );
+}
